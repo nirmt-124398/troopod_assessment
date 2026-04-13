@@ -2,6 +2,35 @@
 
 import { useState, useRef } from "react";
 
+/**
+ * Compresses an image File to a JPEG data URI, scaled so neither dimension
+ * exceeds `maxPx` pixels. NVIDIA vision API struggles with large payloads.
+ */
+async function compressImage(file: File, maxPx = 1024, quality = 0.8): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      let { width, height } = img;
+      if (width > maxPx || height > maxPx) {
+        const scale = Math.min(maxPx / width, maxPx / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("Canvas not supported")); return; }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load image")); };
+    img.src = objectUrl;
+  });
+}
+
 type InputMode = "link" | "upload";
 
 export default function Home() {
@@ -58,14 +87,13 @@ export default function Home() {
       if (inputMode === "link") {
         body.adCreativeUrl = adCreativeUrl;
       } else if (inputMode === "upload" && adCreativeFile) {
-        // Convert file to base64
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(adCreativeFile);
-        });
-        body.adCreativeBase64 = base64;
+        // Guard: reject obviously huge source files (> 15 MB) before compression
+        if (adCreativeFile.size > 15 * 1024 * 1024) {
+          throw new Error("Image is too large (max 15 MB). Please use a smaller file.");
+        }
+        // Compress image to max 1024px / JPEG 80% — keeps base64 payload manageable
+        const compressed = await compressImage(adCreativeFile, 1024, 0.8);
+        body.adCreativeBase64 = compressed;
       }
 
       const res = await fetch("/api/personalize", {
@@ -154,7 +182,7 @@ export default function Home() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
                     <span className="text-sm text-gray-500">Click to upload ad image</span>
-                    <span className="text-xs text-gray-400 mt-1">PNG, JPG, WEBP up to 10MB</span>
+                    <span className="text-xs text-gray-400 mt-1">PNG, JPG, WEBP up to 15 MB (auto-compressed)</span>
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -205,8 +233,9 @@ export default function Home() {
           </div>
 
           {error && (
-            <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm border border-red-100">
-              {error}
+            <div className="bg-red-50 text-red-700 p-3 rounded-lg text-sm border border-red-200 space-y-1">
+              <p className="font-semibold">⚠ Error</p>
+              <p>{error}</p>
             </div>
           )}
 

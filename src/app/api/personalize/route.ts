@@ -161,6 +161,14 @@ export async function POST(req: Request) {
     // --- Step 1: Get a base64 data URI for the vision model ---
     let imageDataUri: string;
     if (adCreativeBase64) {
+      // Guard: NVIDIA vision API has a ~2 MB base64 payload limit
+      const approxBytes = adCreativeBase64.length * 0.75; // base64 → bytes approximation
+      if (approxBytes > 2 * 1024 * 1024) {
+        return NextResponse.json(
+          { error: 'Ad image is too large for the vision model (max ~2 MB after encoding). Please use a smaller or compressed image.' },
+          { status: 400 }
+        );
+      }
       imageDataUri = adCreativeBase64;
     } else {
       console.log('[Engine] Fetching ad image from URL...');
@@ -169,7 +177,20 @@ export async function POST(req: Request) {
 
     // --- Step 2: Extract the ad hook via NVIDIA vision model ---
     console.log('[Engine] Analyzing ad creative with vision model...');
-    const adCopy = await extractAdHook(imageDataUri);
+    let adCopy: string;
+    try {
+      adCopy = await extractAdHook(imageDataUri);
+    } catch (visionErr: any) {
+      const msg = visionErr?.message || String(visionErr);
+      // Provide a user-friendly message for NVIDIA's opaque 400
+      if (msg.includes('400') || msg.toLowerCase().includes('bad request')) {
+        return NextResponse.json(
+          { error: 'The vision model rejected the image (400). This usually means the image is still too large or in an unsupported format. Try a smaller JPEG image (under 1 MB).' },
+          { status: 400 }
+        );
+      }
+      throw visionErr; // Re-throw for the outer catch to handle
+    }
 
     // --- Step 3: Fetch the target landing page ---
     console.log('[Engine] Fetching landing page:', url);
@@ -351,10 +372,10 @@ Rewrite each element to create message match with the ad hook above. Return ONLY
       message: 'Personalization successful',
     });
   } catch (error: any) {
-    console.error('[Engine] Error:', error?.message || error);
-    return NextResponse.json(
-      { error: error?.message || 'An internal error occurred.' },
-      { status: 500 }
-    );
+    const msg: string = error?.message || String(error) || 'An internal error occurred.';
+    console.error('[Engine] Error:', msg);
+    // Surface NVIDIA 400s as 400 to the client (not 500) so the UI shows them clearly
+    const status = (msg.includes('400') || msg.toLowerCase().includes('bad request')) ? 400 : 500;
+    return NextResponse.json({ error: msg }, { status });
   }
 }
