@@ -11,12 +11,64 @@ const openai = new OpenAI({
 /**
  * Converts an image URL to a base64 data URI by fetching it server-side.
  * NVIDIA vision API only accepts base64, not external URLs.
+ * 
+ * Handles anti-bot protections (Amazon, etc.) with multiple retry strategies.
  */
 async function urlToBase64(imageUrl: string): Promise<string> {
-  const res = await fetch(imageUrl);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch ad creative image (status ${res.status}).`);
+  // Strategy 1: Try with standard browser headers first
+  const browserHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/png,image/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.amazon.com/',
+  };
+
+  let res = await fetch(imageUrl, { headers: browserHeaders });
+  
+  // If 403, try curl-based fallback (Node.js exec)
+  if (!res.ok && res.status === 403) {
+    console.log('[Engine] 403 on fetch, trying curl fallback...');
+    const { execSync } = await import('child_process');
+    
+    try {
+      // Use curl with cookie jar and better simulation
+      const curlCmd = [
+        'curl',
+        '-s',
+        '-L',
+        '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        '-H', 'Accept: image/png,image/webp,image/*;q=0.8',
+        '-H', 'Accept-Language: en-US,en;q=0.9',
+        '-H', 'Referer: https://www.amazon.com/',
+        '-H', 'Sec-Fetch-Dest: image',
+        '-H', 'Sec-Fetch-Mode: no-cors',
+        '-H', 'Sec-Fetch-Site: same-origin',
+        imageUrl
+      ].join(' ');
+      
+      const buffer = execSync(curlCmd, { encoding: null, maxBuffer: 10 * 1024 * 1024 }); // 10MB max
+      
+      if (buffer && buffer.length > 0) {
+        // Detect content type from curl output
+        let contentType = 'image/png';
+        if (buffer[0] === 0xFF && buffer[1] === 0xD8) contentType = 'image/jpeg';
+        else if (buffer[0] === 0x89 && buffer[1] === 0x50) contentType = 'image/png';
+        else if (buffer[0] === 0x47 && buffer[1] === 0x49) contentType = 'image/gif';
+        else if (buffer[0] === 0x52 && buffer[1] === 0x49) contentType = 'image/webp';
+        
+        const base64 = Buffer.from(buffer).toString('base64');
+        console.log('[Engine] curl fallback succeeded, got', buffer.length, 'bytes');
+        return `data:${contentType};base64,${base64}`;
+      }
+    } catch (curlErr: any) {
+      console.error('[Engine] curl fallback failed:', curlErr.message);
+    }
   }
+  
+  if (!res.ok) {
+    throw new Error(`Failed to fetch ad creative image (status ${res.status}). The image host may be blocking automated requests. Try downloading the image manually and uploading it instead.`);
+  }
+  
   const contentType = res.headers.get('content-type') || 'image/png';
   const arrayBuffer = await res.arrayBuffer();
   const base64 = Buffer.from(arrayBuffer).toString('base64');
